@@ -9,7 +9,7 @@ Original file is located at
 
 from google.colab import drive
 import pandas as pd
-import torch
+import torch, gc
 import nltk
 from nltk.tokenize import word_tokenize
 import numpy as np
@@ -43,6 +43,11 @@ df_train['full_text'] = df_train['full_text'].apply(lambda x: ' '.join([word for
 df_test['full_text'] = df_test['full_text'].apply(lambda x: ' '.join([word for word in x.split() if word not in (stop)]))
 print(df_train['full_text'][2])
 
+# count max word length
+df_train['num_words'] = df_train['full_text'].apply(lambda x: len(x.split()))
+max_words = round(df_train['num_words'].max())
+print('max word:{}'.format(max_words))
+
 # tokenize
 nltk.download('punkt')
 
@@ -67,6 +72,9 @@ y_test = y_test.to_numpy()
 print(X_train[0])
 print(X_train.shape)
 print(y_train.shape)
+print(y_val.shape)
+print(X_val.shape)
+print(y_test.shape)
 
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
@@ -78,15 +86,15 @@ tokenizer.fit_on_texts(X_train)
 word_index = tokenizer.word_index
 
 train_seq = tokenizer.texts_to_sequences(X_train)
-pad_train = pad_sequences(train_seq, maxlen=1250, truncating='post')
+pad_train = pad_sequences(train_seq, maxlen=max_words, truncating='post')
 
 val_seq = tokenizer.texts_to_sequences(X_val)
-pad_val = pad_sequences(val_seq, maxlen=1250, truncating='post')
+pad_val = pad_sequences(val_seq, maxlen=max_words, truncating='post')
 
 test_seq = tokenizer.texts_to_sequences(X_test)
-pad_test = pad_sequences(test_seq, maxlen=1250, truncating='post') #max length of word is 1250
+pad_test = pad_sequences(test_seq, maxlen=max_words, truncating='post') #max length of word is 1250
 
-print(pad_train[3]) #pad_train is a numpy array
+print(pad_train[0]) #pad_train is a numpy array
 print(pad_train.shape)
 
 ## for y, what should be the shape (6 lists each with its output? or m lists each with 6 outputs)
@@ -97,42 +105,132 @@ print(word_idx_count)
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 import torch.nn as nn
+import torch.optim as optim
 
-def data_sequence(input, label):
-  inout_seq = []
-  for i in range(input.shape[0]):
-    seq = torch.Tensor(input[i,:])
-    target = torch.Tensor(label[i,:])
-    inout_seq.append((seq,target))
-  return inout_seq
+# def data_sequence(input, label):
+#   inout_seq = []
+#   for i in range(input.shape[0]):
+#     seq = torch.Tensor(input[i,:])
+#     target = torch.Tensor(label[i,:])
+#     inout_seq.append((seq,target))
+#   return inout_seq
 
-inout_seq = data_sequence(pad_train,y_train)
-print(inout_seq[3])
+# inout_seq = data_sequence(pad_train,y_train)
+# val_seq = data_sequence(pad_val,y_val)
+# print(inout_seq[3])
+
+batch_size = 1 # hyper parameter
+
+# load dataset
+trainX = torch.Tensor(pad_train)
+trainY = torch.Tensor(y_train)
+train = TensorDataset(trainX, trainY)
+
+valX = torch.Tensor(pad_val)
+valY = torch.Tensor(y_val)
+val = TensorDataset(valX,valY)
+
+testX = torch.Tensor(pad_test)
+testY = torch.Tensor(y_test)
+test = TensorDataset(testX,testY)
+
+train_loader = DataLoader(train, batch_size=batch_size, shuffle=False, drop_last=True)
+val_loader = DataLoader(val, batch_size=1, shuffle=False, drop_last=True)
+test_loader = DataLoader(test, batch_size=1, shuffle=False, drop_last=True)
 
 class LSTM_Model(nn.Module):
   def __init__(self):
     super(LSTM_Model, self).__init__()
     self.embeddings = nn.Embedding(word_idx_count+1, 64)
-    self.lstm1 = nn.LSTM(input_size=64, hidden_size=128, bidirectional=True)
-    self.lstm2 = nn.LSTM(input_size=128, hidden_size=64, bidirectiona=True)
-    self.lstm3 = nn.LSTM(input_size=64, hidden_size=32, bidirectiona=True)
-    self.fc1 = torch.nnLinear(32,2)
-    self.relu = torch.nnReLU()
-    self.fc2 = torch.nn.Linear(2,1)
+    self.lstm1 = nn.LSTM(input_size=64, hidden_size=64, bidirectional=True, batch_first=True)
+    self.lstm2 = nn.LSTM(input_size=128, hidden_size=32, bidirectional=True, batch_first=True)
+    self.lstm3 = nn.LSTM(input_size=64, hidden_size=32, bidirectional=True, batch_first=True)
+    self.fc1 = torch.nn.Linear(64,64)
+    self.relu = torch.nn.ReLU()
+    self.fc2 = torch.nn.Linear(64,32)
+    self.fc3 = torch.nn.Linear(32,6)
 
   def forward(self,inputs):
-    embeds = self.embeddings(inputs)
-    h1 = self.lstm1(embeds)
-    h2 = self.lstm2(h1)  
-    h3 = self.lstm(h2)
+    embeds = self.embeddings(inputs.to(torch.long))
+    h1, states = self.lstm1(embeds)
+    h2, states = self.lstm2(h1)  
+    h3, states = self.lstm3(h2)
+    h3 = h3[:,-1,:]
     h4 = self.fc1(h3)
     h4 = self.relu(h4)
-    out1 = self.fc2(h4)
-    out2 = self.fc2(h4)
-    out3 = self.fc2(h4)
-    out4 = self.fc2(h4)
-    out5 = self.fc2(h4)
-    out6 = self.fc2(h4)
+    h4 = self.fc2(h4)
+    h4 = self.relu(h4)
+    out = self.fc3(h4)
+    return out
 
-for i in range(epochs):
-  for seq, labels in inout_seq:
+!pip install torchinfo
+
+from torchinfo import summary
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gc.collect()
+torch.cuda.empty_cache()
+epochs = 30  #hyper parameter
+model = LSTM_Model().to(device)
+print(model)
+print(summary(model,(1,672)))
+
+optimizer = optim.Adam(model.parameters(), lr=0.001) # hyper parameter
+
+mse = nn.MSELoss()
+train_loss = []
+score = ['cohesion','syntax','vocabulary','phraseology','grammar','conventions']
+train_loss_score = [] # six score loss in each epoch
+val_loss_score = [] # six score loss in validation set
+
+def train(train_loader, val_loader, epochs=3, val_step=15):
+
+  for epoch in range(epochs):
+    batch_loss = []
+    for seq, labels in train_loader:
+      seq = seq.to(device)
+      labels = labels.to(device)
+      # model training
+      model.train()
+      pred = model(seq)
+
+      # append each score into each list
+      loss_list = torch.mean(((pred - labels)**2),dim=0).tolist()
+      print(loss_list)
+      batch_loss.append(loss_list)
+
+      # backward
+      loss = mse(pred, labels)
+      print(f'mse loss {loss}')
+      loss.backward()
+      optimizer.step()
+      optimizer.zero_grad()
+
+      # #print batch loss
+      # for i,s in enumerate(loss_list):
+      #   print(f'batch loss {score[i]}: {loss_list[i]}')
+    
+    #append each epoch score loss
+    loss_epoch = np.mean(batch_loss, axis=0)
+    for i,s in enumerate(loss_epoch):
+      print(f'epoch {epoch} loss {score[i]}: {loss_epoch[i]}')
+    train_loss_score.append(loss_epoch)
+    train_loss.append(np.mean(loss_epoch))
+    print(f'total average loss in epoch {epoch}: {np.mean(loss_epoch)}')
+
+    # # validation
+    # if i+1 == val_step:
+    #   val_loss = []
+    #   with torch.no_grad():
+    #     for x_val, y_val in val_loader:
+    #       x_val = x_val.to(device)
+    #       y_val = y_val.to(device)
+    #       model.eval()
+    #       yhat = model(x_val)
+    #       loss_val_list = ((yhat - y_val)**2).tolist()
+    #       val_loss.append(loss_val_list)
+    #   val_loss = np.mean(loss_val_list, axis=0)
+    #   val_loss_score.append(val_loss)
+  return train_loss, train_loss_score
+
+train(train_loader,val_loader)
